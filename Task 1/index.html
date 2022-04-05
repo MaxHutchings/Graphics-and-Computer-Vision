@@ -1,0 +1,796 @@
+<!DOCTYPE HTML>
+<html lang="en">
+  <head>
+    <title> Phong Lighting and Phone Shading</title>
+    <script src="webgl-debug.js"></script>
+    <script type="text/javascript" src="glMatrix.js"></script>
+    <script src="webgl-utils.js"></script>
+    <meta charset="utf-8">
+
+    <script id="shader-vs" type="x-shader/x-vertex">
+      attribute vec3 aVertexPosition;
+      attribute vec3 aVertexNormal;
+      attribute vec2 aTextureCoordinates;
+
+      uniform mat4 uMVMatrix;
+      uniform mat4 uPMatrix;
+      uniform mat3 uNMatrix;
+
+      varying vec2 vTextureCoordinates;
+      varying vec3 vNormalEye;
+      varying vec3 vPositionEye3;
+
+      void main() {
+        // Get vertex position in eye coordinates and send to the fragment shader
+        vec4 vertexPositionEye4 = uMVMatrix * vec4(aVertexPosition, 1.0);
+        vPositionEye3 = vertexPositionEye4.xyz / vertexPositionEye4.w;
+        // Transform the normal to eye coordinates and send to fragment shader
+        vNormalEye = normalize(uNMatrix * aVertexNormal);
+        // Transform the geometry
+        gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+        vTextureCoordinates = aTextureCoordinates;
+      }
+
+  </script>
+
+  <script id="shader-fs" type="x-shader/x-fragment">
+    precision mediump float;
+
+    varying vec2 vTextureCoordinates;
+    varying vec3 vNormalEye;
+    varying vec3 vPositionEye3;
+
+    uniform vec3 uLightPosition;
+    uniform vec3 uAmbientLightColor;
+    uniform vec3 uDiffuseLightColor;
+    uniform vec3 uSpecularLightColor;
+    uniform sampler2D uSampler;
+
+    const float shininess = 64.0;
+    void main() {
+      // Calculate the vector (L) to the light source
+      vec3 vectorToLightSource = normalize(uLightPosition - vPositionEye3);
+      // Calculate N dot L for diffuse lighting
+      float diffuseLightWeighting = max(dot(vNormalEye, vectorToLightSource), 0.0);
+      // Calculate the reflection vector (R) that is needed for specular light
+      vec3 reflectionVector = normalize(reflect(-vectorToLightSource, vNormalEye));
+      // Calculate view vector (V) in eye coordinates
+      vec3 viewVectorEye = -normalize(vPositionEye3);
+      float rdotv = max(dot(reflectionVector, viewVectorEye), 0.0);
+      float specularLightWeighting = pow(rdotv, shininess);
+      // Sum up all three reflection components
+      vec3 lightWeighting = uAmbientLightColor + uDiffuseLightColor * diffuseLightWeighting + uSpecularLightColor * specularLightWeighting;
+      // Sample the texture
+      vec4 texelColor = texture2D(uSampler, vTextureCoordinates);
+      // modulate texel color with lightweigthing and write as final color
+      gl_FragColor = vec4(lightWeighting.rgb * texelColor.rgb, texelColor.a);
+    }
+
+  </script>
+
+
+  <script type="text/javascript">
+    // Global variables
+    var gl;
+    var pwgl = {};
+    pwgl.ongoingImageLoads = [];
+    var canvas;
+
+    // Variables for interactive control
+    var transY = 0, transZ=0;
+    var xRot =yRot =zRot =xOffs = yOffs = drag = 0;
+    pwgl.listOfPressedKeys = [];
+
+
+    function createGLContext(canvas) {
+      var names = ["webgl", "experimental-webgl"];
+      var context = null;
+      for (var i=0; i < names.length; i++) {
+        try {
+          context = canvas.getContext(names[i]);
+        } catch(e) {}
+        if (context) {
+          break;
+        }
+      }
+      if (context) {
+        context.viewportWidth = canvas.width;
+        context.viewportHeight = canvas.height;
+      } else {
+        alert("Failed to create WebGL context!");
+      }
+      return context;
+    }
+
+    function loadShaderFromDOM(id) {
+      // If the element with the specified id is not found, exit
+      var shaderScript = document.getElementById(id);
+      if (!shaderScript) {
+        return null;
+      }
+
+      // Loop through the children for the found DOM element and build up the shader source code as a string
+      var shaderSource = "";
+      var currentChild = shaderScript.firstChild;
+      while (currentChild) {
+        if (currentChild.nodeType == 3) {
+          shaderSource += currentChild.textContent;
+        }
+        currentChild = currentChild.nextSibling;
+      }
+
+      var shader;
+      if (shaderScript.type == "x-shader/x-fragment") {
+        shader = gl.createShader(gl.FRAGMENT_SHADER);
+      } else if (shaderScript.type == "x-shader/x-vertex") {
+        shader = gl.createShader(gl.VERTEX_SHADER);
+      } else {
+        return null;
+      }
+
+      gl.shaderSource(shader, shaderSource);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS) &&! gl.isContextLost()) {
+        alert("compiler!!!!!!")
+        alert(gl.getShaderInfoLog(shader));
+        return null;
+      }
+      return shader;
+    }
+
+    function setupShaders() {
+      var vertexShader = loadShaderFromDOM("shader-vs");
+      var fragmentShader = loadShaderFromDOM("shader-fs");
+      var shaderProgram = gl.createProgram();
+      gl.attachShader(shaderProgram, vertexShader);
+      gl.attachShader(shaderProgram, fragmentShader);
+      gl.linkProgram(shaderProgram);
+
+      if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS) &&! gl.isContextLost()) {
+        alert("Failed to link shaders: " + gl.getProgramInfoLog(shaderProgram));
+      }
+
+      gl.useProgram(shaderProgram);
+
+      pwgl.vertexPositionAttributeLoc = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+      pwgl.vertexTextureAttributeLoc = gl.getAttribLocation(shaderProgram, "aTextureCoordinates");
+      pwgl.uniformMVMatrixLoc = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+      pwgl.uniformProjMatrixLoc = gl.getUniformLocation(shaderProgram, "uPMatrix");
+      pwgl.uniformSamplerLoc = gl.getUniformLocation(shaderProgram, "uSampler");
+
+      pwgl.uniformNormalMatrixLoc = gl.getUniformLocation(shaderProgram, "uNMatrix");
+      pwgl.vertexNormalAttributeLoc = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+      pwgl.uniformLightPositionLoc =gl.getUniformLocation(shaderProgram, "uLightPosition");
+      pwgl.uniformAmbientLightColorLoc = gl.getUniformLocation(shaderProgram, "uAmbientLightColor");
+      pwgl.uniformDiffuseLightColorLoc = gl.getUniformLocation(shaderProgram, "uDiffuseLightColor");
+      pwgl.uniformSpecularLightColorLoc = gl.getUniformLocation(shaderProgram, "uSpecularLightColor");
+
+      gl.enableVertexAttribArray(pwgl.vertexNormalAttributeLoc);
+      gl.enableVertexAttribArray(pwgl.vertexPositionAttributeLoc);
+      gl.enableVertexAttribArray(pwgl.vertexTextureAttributeLoc);
+
+      pwgl.modelViewMatrix = mat4.create();
+      pwgl.projectionMatrix = mat4.create();
+      pwgl.modelViewMatrixStack = [];
+    }
+
+    function pushModelViewMatrix() {
+      var copyToPush = mat4.create(pwgl.modelViewMatrix);
+      pwgl.modelViewMatrixStack.push(copyToPush);
+    }
+
+    function popModelViewMatrix() {
+      if (pwgl.modelViewMatrixStack.length == 0) {
+        throw "Error popModelViewMatrix() - Stack was empty ";
+      }
+      pwgl.modelViewMatrix = pwgl.modelViewMatrixStack.pop();
+    }
+
+    function setupSphereBuffers() {
+      //m is the number of sections used to create the sphere, and r is the radius of the sphere
+      var m = 30;
+      var r = 10;
+
+      //Vertex arrray variable to be used
+      var sphereVertexPosition = [];
+      var sphereVertexNormals = [];
+      var sphereVertexTextureCoords = [];
+      var sphereVertexIndices = [];
+
+      //Loop to calculate the normals, texture coordinates and vertex positions of a sphere
+      for (var i = 0; i <= m; i++){
+        var t = i * Math.PI / m;
+        var sinT = Math.sin(t);
+        var cosT = Math.cos(t);
+
+        for(var j = 0; j <= m; j++){
+          var p = j * 2 * Math.PI / m;
+          var sinP = Math.sin(p);
+          var cosP = Math.cos(p);
+
+          var x = cosP * sinT;
+          var y = cosT;
+          var z = sinP * sinT;
+          var u = 1 - (j / m);
+          var v = 1 - (i / m);
+
+          // Specify normals to be able to do lighting calculations
+          sphereVertexNormals.push(x);
+          sphereVertexNormals.push(y);
+          sphereVertexNormals.push(z);
+
+          sphereVertexTextureCoords.push(u);
+          sphereVertexTextureCoords.push(v);
+          sphereVertexPosition.push(r * x);
+          sphereVertexPosition.push(r * y);
+          sphereVertexPosition.push(r * z);
+        }
+      }
+
+      //Loop to calculate the indices of the sphere
+      for (var i = 0; i < m; i++){
+        for (var j=0; j < m; j++){
+          var first = (i * (m + 1)) + j;
+          var second = first + m + 1;
+          sphereVertexIndices.push(first);
+          sphereVertexIndices.push(second);
+          sphereVertexIndices.push(first + 1);
+
+          sphereVertexIndices.push(second);
+          sphereVertexIndices.push(second + 1);
+          sphereVertexIndices.push(first + 1);
+        }
+      }
+
+      //Normal
+      pwgl.sphereVertexNormalBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexNormalBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexNormals), gl.STATIC_DRAW);
+      pwgl.SPHERE_VERTEX_NORMAL_BUF_ITEM_SIZE = 3;
+      pwgl.SPHERE_VERTEX_NORMAL_BUF_NUM_ITEMS = sphereVertexNormals.length / 3;
+
+      //Texture
+      pwgl.sphereVertexTextureCoordBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexTextureCoordBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexTextureCoords), gl.STATIC_DRAW);
+      pwgl.SPHERE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+      pwgl.SPHERE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = sphereVertexTextureCoords.length / 2;
+
+      //Position
+      pwgl.sphereVertexPositionBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphereVertexPosition), gl.STATIC_DRAW);
+      pwgl.SPHERE_VERTEX_POS_BUF_ITEM_SIZE = 3;
+      pwgl.SPHERE_VERTEX_POS_BUF_NUM_ITEMS = sphereVertexPosition.length / 3;
+
+      //Index
+      pwgl.sphereVertexIndexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereVertexIndexBuffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphereVertexIndices), gl.STATIC_DRAW);
+      pwgl.SPHERE_VERTEX_INDEX_BUF_ITEM_SIZE = 1;
+      pwgl.SPHERE_VERTEX_INDEX_BUF_NUM_ITEMS = sphereVertexIndices.length;
+    }
+
+    // Base cube that is used in making the satellite
+    // Cube is of size [1, 1, 1]
+    function setupCubeBuffers() {
+      pwgl.cubeVertexPositionBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexPositionBuffer);
+      var cubeVertexPosition = [
+        // Front face
+        0.5,  0.5,  0.5, //v0
+        -0.5,  0.5,  0.5, //v1
+        -0.5, -0.5,  0.5, //v2
+        0.5, -0.5,  0.5, //v3
+
+        // Back face
+        0.5,  0.5, -0.5, //v4
+        -0.5,  0.5, -0.5, //v5
+        -0.5, -0.5, -0.5, //v6
+        0.5, -0.5, -0.5, //v7
+
+        // Left face
+        -0.5,  0.5,  0.5, //v8
+        -0.5,  0.5, -0.5, //v9
+        -0.5, -0.5, -0.5, //v10
+        -0.5, -0.5,  0.5, //v11
+
+        // Right face
+        0.5,  0.5,  0.5, //12
+        0.5, -0.5,  0.5, //13
+        0.5, -0.5, -0.5, //14
+        0.5,  0.5, -0.5, //15
+
+        // Top face
+        0.5,  0.5,  0.5, //v16
+        0.5,  0.5, -0.5, //v17
+        -0.5,  0.5, -0.5, //v18
+        -0.5,  0.5,  0.5, //v19
+
+        // Bottom face
+        0.5, -0.5,  0.5, //v20
+        0.5, -0.5, -0.5, //v21
+        -0.5, -0.5, -0.5, //v22
+        -0.5, -0.5,  0.5, //v23
+      ];
+
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVertexPosition), gl.STATIC_DRAW);
+      pwgl.CUBE_VERTEX_POS_BUF_ITEM_SIZE = 3;
+      pwgl.CUBE_VERTEX_POS_BUF_NUM_ITEMS = 24;
+
+      // Indices
+      pwgl.cubeVertexIndexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.cubeVertexIndexBuffer);
+
+      var cubeVertexIndices = [
+        0, 1, 2,      0, 2, 3,
+        4, 6, 5,      4, 7, 6,
+        8, 9, 10,     8, 10, 11,
+        12, 13, 14,   12, 14, 15,
+        16, 17, 18,   16, 18, 19,
+        20, 22, 21,   20, 23, 22
+      ];
+
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(cubeVertexIndices), gl.STATIC_DRAW);
+      pwgl.CUBE_VERTEX_INDEX_BUF_ITEM_SIZE = 1;
+      pwgl.CUBE_VERTEX_INDEX_BUF_NUM_ITEMS = 36;
+
+      //Texture
+      pwgl.cubeVertexTextureCoordinateBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexTextureCoordinateBuffer);
+      // Texture coordinates match with a 4x2 texture map (sat.jpg has an example)
+      var textureCoordinates = [
+        // select the top left image
+        0.0 , 0.0,
+        0.0 , 0.5,
+        0.25, 0.0,
+        0.25, 0.5,
+        // select to top right image
+        0.5 , 0.0,
+        0.5, 0.5,
+        0.75, 0.0,
+        0.75, 0.5,
+        // select the top middle image
+        0.25, 0.0,
+        0.25 , 0.5,
+        0.5 , 0.0,
+        0.5, 0.5,
+        // select the bottom left image
+        0.0, 0.5,
+        0.0, 1,
+        0.25, 0.5,
+        0.25, 1,
+        // select the bottom middle image
+        0.25, 0.5,
+        0.5 , 0.5,
+        0.5, 1,
+        0.25, 1,
+        // select the bottom right image
+        0.5, 0.5,
+        0.5, 1,
+        0.75, 0.5,
+        0.75, 1
+      ];
+
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoordinates),gl.STATIC_DRAW);
+      pwgl.CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE = 2;
+      pwgl.CUBE_VERTEX_TEX_COORD_BUF_NUM_ITEMS = 24;
+
+      // Specify normals to be able to do lighting calculations
+      pwgl.cubeVertexNormalBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexNormalBuffer);
+      var cubeVertexNormals = [
+        // Front face
+        0.0,  0.0,  1.0,
+        0.0,  0.0,  1.0,
+        0.0,  0.0,  1.0,
+        0.0,  0.0,  1.0,
+
+        // Back face
+        0.0,  0.0, -1.0,
+        0.0,  0.0, -1.0,
+        0.0,  0.0, -1.0,
+        0.0,  0.0, -1.0,
+
+        // Left face
+        -1.0,  0.0,  0.0,
+        -1.0,  0.0,  0.0,
+        -1.0,  0.0,  0.0,
+        -1.0,  0.0,  0.0,
+
+        // Right face
+        1.0,  0.0,  0.0,
+        1.0,  0.0,  0.0,
+        1.0,  0.0,  0.0,
+        1.0,  0.0,  0.0,
+
+        // Top face
+        0.0,  1.0,  0.0,
+        0.0,  1.0,  0.0,
+        0.0,  1.0,  0.0,
+        0.0,  1.0,  0.0,
+
+        // Bottom face
+        0.0, -1.0,  0.0,
+        0.0, -1.0,  0.0,
+        0.0, -1.0,  0.0,
+        0.0, -1.0,  0.0,
+      ];
+
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(cubeVertexNormals),
+      gl.STATIC_DRAW);
+      pwgl.CUBE_VERTEX_NORMAL_BUF_ITEM_SIZE = 3;
+      pwgl.CUBE_VERTEX_NORMAL_BUF_NUM_ITEMS = 24;
+    }
+
+
+    function setupTextures() {
+      //Texture used on the sphere
+      pwgl.earthTexture = gl.createTexture();
+      loadImageForTexture("earth.jpg", pwgl.earthTexture);
+
+      //Texture used on the solar panels of the satellite
+      pwgl.solarTexture = gl.createTexture();
+      loadImageForTexture("blue.jpg", pwgl.solarTexture);
+
+      //Texture used on the dish of the satellite and the rods
+      pwgl.goldTexture = gl.createTexture();
+      loadImageForTexture("gold.jpg", pwgl.goldTexture);
+
+      //Texture used on the base of the satellite, where one side is different from the others
+      // Explantion of the texture is in the report (Task 1 Satellite)
+      pwgl.satTexture = gl.createTexture();
+      loadImageForTexture("sat.jpg", pwgl.satTexture);
+    }
+
+    function loadImageForTexture(url, texture) {
+      var image = new Image();
+      image.onload = function() {
+        pwgl.ongoingImageLoads.splice(pwgl.ongoingImageLoads.indexOf(image), 1);
+        textureFinishedLoading(image, texture);
+      }
+      pwgl.ongoingImageLoads.push(image);
+      image.src = url;
+    }
+
+    function textureFinishedLoading(image, texture) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+
+      gl.generateMipmap(gl.TEXTURE_2D);
+
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    function setupBuffers() {
+      setupCubeBuffers();
+      setupSphereBuffers();
+    }
+
+    function setupLights() {
+      // Setup information about the light
+      gl.uniform3fv(pwgl.uniformLightPositionLoc, [50.0, 86.6, 0.0]);  // y = 50 * tan(60) using SOHCAHTOA where 50 is adj and 60 is the angle in degrees (explained in the report, Task 1 Lighting)
+      gl.uniform3fv(pwgl.uniformAmbientLightColorLoc, [0.2, 0.2, 0.2]);
+      gl.uniform3fv(pwgl.uniformDiffuseLightColorLoc, [0.7, 0.7, 0.7]);
+      gl.uniform3fv(pwgl.uniformSpecularLightColorLoc, [0.8, 0.8, 0.8]);
+    }
+
+    function uploadNormalMatrixToShader() {
+      var normalMatrix = mat3.create();
+      mat4.toInverseMat3(pwgl.modelViewMatrix, normalMatrix);
+      mat3.transpose(normalMatrix);
+      gl.uniformMatrix3fv(pwgl.uniformNormalMatrixLoc, false, normalMatrix);
+    }
+
+    function uploadModelViewMatrixToShader() {
+      gl.uniformMatrix4fv(pwgl.uniformMVMatrixLoc, false, pwgl.modelViewMatrix);
+    }
+
+    function uploadProjectionMatrixToShader() {
+      gl.uniformMatrix4fv(pwgl.uniformProjMatrixLoc, false, pwgl.projectionMatrix);
+    }
+
+    function drawSphere(texture) {
+      //Position Buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexPositionBuffer);
+      gl.vertexAttribPointer(pwgl.vertexPositionAttribute, pwgl.SPHERE_VERTEX_POS_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+
+      //Normal Buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexNormalBuffer);
+      gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, pwgl.SPHERE_VERTEX_NORMAL_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+
+      //Texture Buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.sphereVertexTextureCoordBuffer);
+      gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc, pwgl.SPHERE_VERTEX_TEX_COORD_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+
+      //Index Buffer
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.sphereVertexIndexBuffer);
+      gl.drawElements(gl.TRIANGLE_STRIP, pwgl.SPHERE_VERTEX_INDEX_BUF_NUM_ITEMS, gl.UNSIGNED_SHORT, 0);
+    }
+
+
+    function drawCube(texture) {
+      // Bind position buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexPositionBuffer);
+      gl.vertexAttribPointer(pwgl.vertexPositionAttributeLoc, pwgl.CUBE_VERTEX_POS_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+
+      // Bind normal buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexNormalBuffer);
+      gl.vertexAttribPointer(pwgl.vertexNormalAttributeLoc, pwgl.CUBE_VERTEX_NORMAL_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+
+      // bind texture coordinate buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, pwgl.cubeVertexTextureCoordinateBuffer);
+      gl.vertexAttribPointer(pwgl.vertexTextureAttributeLoc, pwgl.CUBE_VERTEX_TEX_COORD_BUF_ITEM_SIZE, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+
+      // Bind index buffer and draw cube
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pwgl.cubeVertexIndexBuffer);
+      gl.drawElements(gl.TRIANGLES, pwgl.CUBE_VERTEX_INDEX_BUF_NUM_ITEMS, gl.UNSIGNED_SHORT, 0);
+    }
+
+    // Function takes the translation array, scale array and the texture to be applied to a cube
+    // and will apply all changes to the cube and draw it
+    function changeCube(translation, scale, texture) {
+      pushModelViewMatrix();
+      mat4.translate(pwgl.modelViewMatrix, translation, pwgl.modelViewMatrix);
+      mat4.scale(pwgl.modelViewMatrix, scale, pwgl.modelViewMatrix);
+      uploadModelViewMatrixToShader();
+      uploadNormalMatrixToShader();
+      drawCube(texture);
+      popModelViewMatrix();
+    }
+
+    //Function to draw all the features of the satellite by transforming a cube
+    function drawSatellite() {
+      //Transforms the cube to create the base of the satellite
+      pushModelViewMatrix();
+      mat4.scale(pwgl.modelViewMatrix, [2.0, 2.0, 2.0], pwgl.modelViewMatrix);
+      uploadModelViewMatrixToShader();
+      uploadNormalMatrixToShader();
+      drawCube(pwgl.satTexture);
+      popModelViewMatrix();
+
+      //Transforms the cube to create the right rod
+      changeCube([0.0, 0.0, 1.3], [0.2, 0.2, 0.5], pwgl.goldTexture);
+      //Transforms the cube to create the left rod
+      changeCube([0, 0.0, -1.3], [0.2, 0.2, 0.5], pwgl.goldTexture);
+      //Transforms the cube to create the right solar panel
+      changeCube([0.0, 0.0, 2.5], [1.0, 0, 2.0], pwgl.solarTexture);
+      //Transforms the cube to create the left solar panel
+      changeCube([0.0, 0.0, -2.5], [1.0, 0, 2.0], pwgl.solarTexture);
+      //Transforms the cube to create the rod at the front
+      changeCube([-1.3, 0.0, 0.0], [0.4, 0.2, 0.2], pwgl.goldTexture);
+
+      //Transforms the sphere to create the dish (dish is a squashed sphere)
+      pushModelViewMatrix();
+      mat4.translate(pwgl.modelViewMatrix, [-1.5, 0.0, 0.0], pwgl.modelViewMatrix);
+      mat4.scale(pwgl.modelViewMatrix, [0.0001, 0.2, 0.2], pwgl.modelViewMatrix);
+      uploadModelViewMatrixToShader();
+      uploadNormalMatrixToShader();
+      drawSphere(pwgl.goldTexture);
+      popModelViewMatrix();
+    }
+
+
+    function draw() {
+      pwgl.requestId = requestAnimFrame(draw);
+
+      var currentTime = Date.now();
+
+      handlePressedDownKeys();
+
+      if(currentTime - pwgl.previousFrameTimeStamp >= 1000) {
+        pwgl.fpsCounter.innerHTML = pwgl.nbrOfFramesForFPS;
+        pwgl.nbrOfFramesForFPS = 0;
+        pwgl.previousFrameTimeStamp = currentTime;
+      }
+
+      mat4.translate(pwgl.modelViewMatrix, [0.0, transY, transZ], pwgl.modelViewMatrix);
+      mat4.rotateX(pwgl.modelViewMatrix, xRot/50, pwgl.modelViewMatrix);
+      mat4.rotateY(pwgl.modelViewMatrix, yRot/50, pwgl.modelViewMatrix);
+
+      yRot = xRot = zRot =transY=transZ=0;
+
+      uploadModelViewMatrixToShader();
+      uploadProjectionMatrixToShader();
+      uploadNormalMatrixToShader();
+      gl.uniform1i(pwgl.uniformSamplerLoc, 0);
+
+      gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+
+      pushModelViewMatrix();
+      if (currentTime === undefined) {
+        currentTime = Date.now();
+      }
+
+      if (pwgl.animationStartTime === undefined) {
+        pwgl.animationStartTime = currentTime;
+      }
+
+      // Calculations for the animation of the satellite
+      // Speed and radius are controlled by the users inputs
+      pwgl.orbitAngle = (currentTime - pwgl.animationStartTime)/ pwgl.orbitSpeed *2*Math.PI % (2*Math.PI);
+      pwgl.x = Math.cos(pwgl.orbitAngle) * pwgl.orbitRadius;
+      pwgl.z = Math.sin(pwgl.orbitAngle) * pwgl.orbitRadius;
+
+      //Calculations for the animation of the earth, the earth is set to rotate on its own very slowly
+      pwgl.spinEarth = ((currentTime - pwgl.animationStartTime) / 10) / 2000 * 2 * Math.PI % (2 * Math.PI);
+
+      // This calculation means that the satellite will always face the center of the earth
+      // This is done by working using the angle the satellite is from the center of the earth and using the reverse of that angle to always point at the center
+      // e.g. if the satellite is at a 270 degree angle from the center of the earth, then the satellite will face towards 90
+      pwgl.satelliteAngle = 2 * Math.PI - pwgl.orbitAngle;
+
+      // applies all of the translations and rotations to the satellite and draws it
+      mat4.translate(pwgl.modelViewMatrix, [pwgl.x, pwgl.y, pwgl.z], pwgl.modelViewMatrix);
+      mat4.rotate(pwgl.modelViewMatrix, pwgl.satelliteAngle, [0.0, 1.0, 0.0], pwgl.modelViewMatrix);
+      uploadModelViewMatrixToShader();
+      uploadNormalMatrixToShader();
+      drawSatellite();
+      popModelViewMatrix();
+
+      pushModelViewMatrix();
+      // applies the slow rotation of the earth
+      mat4.rotate(pwgl.modelViewMatrix, pwgl.spinEarth, [0.0, 1.0, 0.0], pwgl.modelViewMatrix);
+      uploadModelViewMatrixToShader();
+      uploadNormalMatrixToShader();
+      drawSphere(pwgl.earthTexture);
+      popModelViewMatrix();
+
+      pwgl.nbrOfFramesForFPS++;
+    }
+
+    function handleContextLost(event) {
+      event.preventDefault();
+      cancelRequestAnimFrame(pwgl.requestId);
+      for (var i = 0; i < pwgl.ongoingImageLoads.length; i++) {
+        pwgl.ongoingImageLoads[i].onload = undefined;
+      }
+      pwgl.ongoingImageLoads = [];
+    }
+
+    function init() {
+      // Initialization that is performed during first startup and when the event webglcontextrestored is received is included in this function.
+      setupShaders();
+      setupBuffers();
+      setupLights();
+      setupTextures();
+      gl.clearColor(0.0, 0.0, 0.0, 1.0);
+      gl.enable(gl.DEPTH_TEST);
+
+      // Variables for animations
+      pwgl.x = 0.0;
+      pwgl.y = 0.0;
+      pwgl.z = 0.0;
+      pwgl.orbitRadius = 20;
+      pwgl.orbitAngle = 0;
+      pwgl.orbitSpeed = 2000;
+
+      // Initialize some variables related to the animation
+      pwgl.animationStartTime = undefined;
+      pwgl.nbrOfFramesForFPS = 0;
+      pwgl.previousFrameTimeStamp = Date.now();
+
+
+      mat4.perspective(60, gl.viewportWidth / gl.viewportHeight, 1, 100.0, pwgl.projectionMatrix);
+      mat4.identity(pwgl.modelViewMatrix);
+      // Place camera location
+      mat4.lookAt([30, 12, 30],[0, 0, 0], [0, 1, 0], pwgl.modelViewMatrix);
+    }
+
+    function handleContextRestored(event) {
+      init();
+      pwgl.requestId = requestAnimFrame(draw,canvas);
+    }
+
+    function handleKeyDown(event) {
+      pwgl.listOfPressedKeys[event.keyCode] = true;
+    }
+
+    function handleKeyUp(event) {
+      pwgl.listOfPressedKeys[event.keyCode] = false;
+    }
+
+    function handlePressedDownKeys() {
+      if (pwgl.listOfPressedKeys[39]) {
+        // Arrow right, increase radius of circle
+        pwgl.orbitRadius += 0.1;
+      }
+
+      if (pwgl.listOfPressedKeys[37]) {
+        // Arrow left, decrease radius of circle
+        pwgl.orbitRadius -= 0.1;
+        if (pwgl.orbitRadius < 0) {
+          pwgl.orbitRadius = 0;
+        }
+      }
+
+      if (pwgl.listOfPressedKeys[38]) {
+        // Arrow up, increase orbit speed
+        // The value 15 is explained in the report (Task 1 Difficulties and Problems)
+        pwgl.orbitSpeed += 15;
+      }
+
+      if (pwgl.listOfPressedKeys[40]) {
+        // Arrow down, decrease orbit speed
+        // The value 15 is explained in the report (Task 1 Difficulties and Problems)
+        pwgl.orbitSpeed -= 15;
+        if (pwgl.orbitSpeed < 0) {
+          pwgl.orbitSpeed = 0;
+        }
+      }
+    }
+
+    function startup() {
+      canvas = document.getElementById("myGLCanvas");
+      canvas = WebGLDebugUtils.makeLostContextSimulatingCanvas(canvas);
+      canvas.addEventListener('webglcontextlost', handleContextLost, false);
+      canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+      document.addEventListener('keydown', handleKeyDown, false);
+      document.addEventListener('keyup', handleKeyUp, false);
+      canvas.addEventListener('mousemove', mymousemove, false);
+      canvas.addEventListener('mousedown', mymousedown, false);
+      canvas.addEventListener('mouseup', mymouseup, false);
+      canvas.addEventListener('mousewheel', wheelHandler, false);
+      canvas.addEventListener('DOMMouseScroll', wheelHandler, false);
+
+      gl = createGLContext(canvas);
+
+      init();
+
+      pwgl.fpsCounter = document.getElementById("fps");
+
+      // Draws the complete scene
+      draw();
+    }
+
+    function mymousedown( ev ){
+      drag  = 1;
+      xOffs = ev.clientX;
+      yOffs = ev.clientY;
+    }
+
+    function mymouseup( ev ){
+      drag  = 0;
+    }
+
+    function mymousemove( ev ){
+      if ( drag == 0 ) return;
+      if ( ev.shiftKey ) {
+        transZ = (ev.clientY - yOffs)/10;
+      } else if (ev.altKey) {
+        transY = -(ev.clientY - yOffs)/10;
+      } else {
+        yRot = - xOffs + ev.clientX;
+        xRot = - yOffs + ev.clientY;
+      }
+      xOffs = ev.clientX;
+      yOffs = ev.clientY;
+    }
+
+    function wheelHandler(ev) {
+      if (ev.altKey) transY = -ev.detail/10;
+      else transZ =ev.detail/10;
+      ev.preventDefault();
+    }
+
+  </script>
+
+  </head>
+  <body onload="startup();">
+    <canvas id="myGLCanvas" width="500" height="500"></canvas>
+    <div id="fps-counter"> FPS: <span id="fps">--</span></div>
+  </body>
+</html>
